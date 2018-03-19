@@ -1,272 +1,395 @@
-"use strict";
+import { createWriteStream, readFileSync } from 'fs';
+import { basename, dirname, join } from 'path';
 
-const path = require('path'),
-      expect = require('expect.js'),
-      fs = require('fs-extra'),
-      decompress = require('decompress');
+import test from 'ava';
+import webpack from 'webpack';
+import rimraf from 'rimraf';
+import mkdirp from 'mkdirp';
+import yauzl from 'yauzl';
 
-const RUN_WEBPACK_DIST = path.join(process.cwd(), "test/runWebpack/dist");
+import ZipPlugin from '../index';
 
-describe("resource-build", function() {
-  	it("=> check offline folder", function(done) {
+function randomPath() {
+	return join(__dirname, 'dist', String(Math.random()).slice(2));
+}
 
-  		expect(fs.existsSync(path.join(RUN_WEBPACK_DIST, '/resource-build/ak.zip'))).to.be(true);
-  		
-  		var offline = path.join(RUN_WEBPACK_DIST, '/resource-build/ak'),
-  			localhost = fs.readdirSync(offline);
+function runWithOptions({ path, filename }, options) {
+	return new Promise((resolve, reject) => {
+		webpack({
+			entry: join(__dirname, 'src', 'app'),
+			bail: true,
+			output: {
+				path,
+				filename
+			},
+			plugins: [
+				new ZipPlugin(options)
+			]
+		}, (err, stats) => {
+			err ? reject(err) : resolve(stats);
+		});
+	});
+}
 
-    	expect(localhost[0]).to.be('localhost');
+test('basic', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' });
 
-    	var localhost = path.join(RUN_WEBPACK_DIST, '/resource-build/ak/localhost'),
-    		ports = fs.readdirSync(localhost);
-    	
-    	expect(ports[0]).to.be('8000');
-    	expect(ports[1]).to.be('9000');
+	const byeJpg = readFileSync(join(out, 'subdir', 'bye.jpg'));
+	const bundleJs = readFileSync(join(out, 'bundle.js'), 'utf8');
+	const spawnedJs = readFileSync(join(out, 'spawned.js'), 'utf8');
+	const bundleJsZip = readFileSync(join(out, 'bundle.js.zip'));
 
-    	var port9000 = path.join(RUN_WEBPACK_DIST, '/resource-build/ak/localhost/9000'),
-    		htmlFolder = fs.readdirSync(port9000);
-
-    	expect(htmlFolder[0]).to.be('entry.html');
-
-    	var port8000 = path.join(RUN_WEBPACK_DIST, '/resource-build/ak/localhost/8000'),
-    		jsFolder = fs.readdirSync(path.join(port8000, 'js')),
-    		cssFolder = fs.readdirSync(path.join(port8000, 'css'));
-
-    	expect(jsFolder[0]).to.be('index.js');
-    	expect(jsFolder[1]).to.be('libs');
-    	expect(cssFolder[0]).to.be('index.css');
-
-    	var libs = path.join(RUN_WEBPACK_DIST, '/resource-build/ak/localhost/8000/js/libs/'),
-    	    libsFolder = fs.readdirSync(libs);
-
-    	expect(libsFolder[0]).to.be('react.js');
-
-        decompress(path.join(RUN_WEBPACK_DIST, '/resource-build/ak.zip'), path.join(RUN_WEBPACK_DIST, '/resource-build/unzip')).then(files => {
-
-            let filesArr = [];
-
-            files.map((item) => {
-                filesArr.push(item.path);
-            });
-
-            expect(!!~filesArr.indexOf('localhost/8000/css/index.css')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/js/index.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/js/libs/react.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/entry.html')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img/resource-build/img/adidas.jpg')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img/resource-build/img/google.jpg')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img/resource-build/img/ibm.jpg')).to.be(true);
-            
-            done();
-        });
-  	});
+	t.truthy(byeJpg);
+	t.regex(bundleJs, /var a = 'b';/);
+	t.regex(spawnedJs, /var foo = 'bar';/);
+	t.truthy(bundleJsZip);
 });
 
-describe("resource-build1", function() {
-    it("=> check offline folder", function(done) {
-        let dest = path.join(RUN_WEBPACK_DIST, '/resource-build1/'),
-            destInfo = fs.readdirSync(dest);
+async function unzip(zipFilePath, outDirPath) {
+	const zipFile = await new Promise((resolve, reject) => {
+		yauzl.open(zipFilePath, { lazyEntries: true }, (err, zipFile) => {
+			err ? reject(err) : resolve(zipFile);
+		});
+	});
 
-        expect(destInfo.indexOf('ak') === -1).to.be(true);
+	zipFile.readEntry();
 
-        expect(fs.existsSync(path.join(RUN_WEBPACK_DIST, '/resource-build1/ak.zip'))).to.be(true);
+	zipFile.on('entry', entry => {
+		zipFile.openReadStream(entry, (err, readStream) => {
+			if (err) throw err;
+			mkdirp.sync(join(outDirPath, dirname(entry.fileName)));
+			const writeStream = createWriteStream(join(outDirPath, entry.fileName));
+			readStream.pipe(writeStream);
+			writeStream.on('close', () => zipFile.readEntry());
+		});
+	});
 
-        decompress(path.join(RUN_WEBPACK_DIST, '/resource-build1/ak.zip'), path.join(RUN_WEBPACK_DIST, '/resource-build1/unzip')).then(files => {
+	await new Promise((resolve, reject) => {
+		zipFile.on('close', resolve);
+		zipFile.on('error', reject);
+	});
+}
 
-            let filesArr = [];
+test('roundtrip', async t => {
+	const out = randomPath();
+	const outSrc = join(out, 'src');
+	const outDst = join(out, 'dst');
 
-            files.map((item) => {
-                filesArr.push(item.path);
-            });
+	await runWithOptions({ path: outSrc, filename: 'bundle.js' });
 
-            expect(!!~filesArr.indexOf('localhost/8000/css/index.css')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/js/index.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/js/libs/react.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/entry.html')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img/resource-build1/img/adidas.jpg')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img/resource-build1/img/google.jpg')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img/resource-build1/img/ibm.jpg')).to.be(true);
-            
-            done();
-        });
+	await unzip(join(outSrc, 'bundle.js.zip'), outDst);
+
+	t.is(Buffer.compare(
+		readFileSync(join(outSrc, 'subdir', 'bye.jpg')),
+		readFileSync(join(outDst, 'subdir', 'bye.jpg'))
+	), 0);
+	t.is(Buffer.compare(
+		readFileSync(join(outSrc, 'bundle.js')),
+		readFileSync(join(outDst, 'bundle.js'))
+	), 0);
+	t.is(Buffer.compare(
+		readFileSync(join(outSrc, 'spawned.js')),
+		readFileSync(join(outDst, 'spawned.js'))
+	), 0);
+});
+
+async function roundtrip(options) {
+	const out = randomPath();
+	const outSrc = join(out, 'src');
+	const outDst = join(out, 'dst');
+
+	await runWithOptions({ path: outSrc, filename: 'bundle.js' }, options);
+
+	await unzip(join(outSrc, 'bundle.js.zip'), outDst);
+
+	return outDst;
+}
+
+test('exclude string', async t => {
+	const out = await roundtrip({ exclude: 'spawned.js' });
+
+	t.truthy(readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.throws(() => readFileSync(join(out, 'spawned.js')));
+});
+
+test('include string', async t => {
+	const out = await roundtrip({ include: 'spawned.js' });
+
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.throws(() => readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('exclude regex', async t => {
+	const out = await roundtrip({ exclude: /\.jpg$/ });
+
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('include regex', async t => {
+	const out = await roundtrip({ include: /\.js$/ });
+
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('multiple excludes', async t => {
+	const out = await roundtrip({ exclude: [/\.jpg$/, 'bundle.js'] });
+
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.throws(() => readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('multiple includes', async t => {
+	const out = await roundtrip({ include: [/\.jpg$/, 'bundle.js'] });
+
+	t.truthy(readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.throws(() => readFileSync(join(out, 'spawned.js')));
+});
+
+test('exclude overrides include', async t => {
+	const out = await roundtrip({ include: [/\.jpg$/, /\.js$/], exclude: ['bundle.js'] });
+
+	t.truthy(readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.throws(() => readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('exclude dir', async t => {
+	const out = await roundtrip({ exclude: 'subdir/' });
+
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('loaders not tested for include', async t => {
+	const out = await roundtrip({ include: /file/i });
+
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.throws(() => readFileSync(join(out, 'bundle.js')));
+	t.throws(() => readFileSync(join(out, 'spawned.js')));
+});
+
+test('loaders not tested for exclude', async t => {
+	const out = await roundtrip({ exclude: /file/i });
+
+	t.truthy(readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
+
+test('fileOptions', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, {
+		fileOptions: {
+			mtime: new Date('2016-01-01Z'),
+			mode: 0o100664,
+			forceZip64Format: true,
+			compress: false,
+		},
+	});
+
+	t.is(readFileSync(join(out, 'bundle.js.zip')).length, 62074);
+});
+
+test('zipOptions', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, {
+		zipOptions: {
+			forceZip64Format: true,
+		},
+	});
+
+	t.is(readFileSync(join(out, 'bundle.js.zip')).length, 57578);
+});
+
+test('fileOptions and zipOptions', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, {
+		fileOptions: {
+			mtime: new Date('2015-01-01Z'),
+			mode: 0o100665,
+			forceZip64Format: true,
+		},
+		zipOptions: {
+			forceZip64Format: true,
+		},
+	});
+
+	t.is(readFileSync(join(out, 'bundle.js.zip')).length, 57662);
+});
+
+test('pathPrefix', async t => {
+    const out = await roundtrip({ pathPrefix: 'prefix' });
+
+    t.truthy(readFileSync(join(out, 'prefix', 'subdir', 'bye.jpg')));
+    t.truthy(readFileSync(join(out, 'prefix', 'bundle.js')));
+});
+
+test('pathPrefix - throws on absolute path', async t => {
+    t.throws(() => {
+    	const plugin = new ZipPlugin({ pathPrefix: '/prefix' });
+    	plugin.apply();
     });
 });
 
-describe("resource-sameorigin", function() {
-    it("=> check offline folder with same origin js files", function(cb) {
+test('pathMapper - jpg', async t => {
+	const out = await roundtrip({
+		pathMapper: p => {
+			if (p.endsWith('.jpg')) return join(dirname(p), 'images', basename(p));
+			return p;
+		}
+	});
 
-        expect(fs.existsSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline.zip'))).to.be(true);
-      
-        var offline = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline'),
-            localhost = fs.readdirSync(offline);
+	t.truthy(readFileSync(join(out, 'subdir', 'images', 'bye.jpg')));
+	t.throws(() => readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'spawned.js')));
+});
 
-        expect(localhost[0]).to.be('localhost');
+test('pathMapper - js', async t => {
+	const out = await roundtrip({
+		pathMapper: p => {
+			if (p.endsWith('.js')) return join(dirname(p), 'js', basename(p));
+			return p;
+		}
+	});
 
-        var localhost = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost'),
-            ports = fs.readdirSync(localhost);
-      
-        expect(ports[0]).to.be('8000');
-        expect(ports[1]).to.be('9000');
+	t.truthy(readFileSync(join(out, 'subdir', 'bye.jpg')));
+	t.truthy(readFileSync(join(out, 'js', 'bundle.js')));
+	t.throws(() => readFileSync(join(out, 'bundle.js')));
+	t.truthy(readFileSync(join(out, 'js', 'spawned.js')));
+	t.throws(() => readFileSync(join(out, 'spawned.js')));
+});
 
-        var port9000 = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost/9000'),
-            htmlFolder = fs.readdirSync(port9000),
-            jsFolder = fs.readdirSync(path.join(port9000, 'js'));
+test('naming - default options, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out });
+	t.truthy(readFileSync(join(out, '[name].js.zip')), '.zip exists');
+});
 
-        expect(htmlFolder[0]).to.be('entry.html');
-        expect(jsFolder[0]).to.be('index.js');
-        expect(jsFolder[1]).to.be('libs');
+test('naming - default options, with webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' });
+	t.truthy(readFileSync(join(out, 'bundle.js.zip')), '.zip exists');
+});
 
-        var port8000 = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost/8000'),
-            cssFolder = fs.readdirSync(path.join(port8000, 'css'));
+test('naming - specified filename with .zip, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { filename: 'my_app.zip' });
+	t.truthy(readFileSync(join(out, 'my_app.zip')), '.zip exists');
+});
 
-        expect(cssFolder[0]).to.be('index.css');
+test('naming - specified filename without .zip, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { filename: 'my_app' });
+	t.truthy(readFileSync(join(out, 'my_app.zip')), '.zip exists');
+});
 
-        var libs = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost/9000/js/libs/'),
-            libsFolder = fs.readdirSync(libs);
+test('naming - specified filename with .zip, with webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, { filename: 'my_app.zip' });
+	t.truthy(readFileSync(join(out, 'my_app.zip')), '.zip exists');
+});
 
-        expect(libsFolder[0]).to.be('react.js');
+test('naming - specified filename and extension, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { filename:'file', extension: 'ext'})
+	t.truthy(readFileSync(join(out, 'file.ext')), '.ext exists');
+});
 
-        let htmlContent = fs.readFileSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost/9000/entry.html'), "utf-8");
+test('naming - specified extension, webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, { extension: 'ext'})
+	t.truthy(readFileSync(join(out, 'bundle.js.ext')), '.ext exists');
+});
 
-        let matchCount = 0;
-        //
-        htmlContent.replace(new RegExp("(<script[^>]*src=([\'\"]*)(.*?)([\'\"]*).*?\>(<\/script>)?)", 'gi'), function(match) {
-            if (!!~match.indexOf('localhost:9000')) {
-                matchCount++;
-            }
-        });
+test('naming - specified extension, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { extension: 'ext'})
+	t.truthy(readFileSync(join(out, '[name].js.ext')), '.ext exists');
+});
 
-        expect(matchCount).to.be(2);
+test('naming - specified relative path and extension, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: 'zip', extension: 'ext'})
+	t.truthy(readFileSync(join(out, 'zip', '[name].js.ext')), '.ext exists');
+});
 
+test('naming - specified relative path with slash and extension, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: './zip', extension: 'ext'})
+	t.truthy(readFileSync(join(out, 'zip', '[name].js.ext')), '.ext exists');
+});
 
-        let jsContent = fs.readFileSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost/9000/js/index.js'), "utf-8");
-        matchCount = 0;
+test('naming - specified relative path, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: 'zip' });
+	t.truthy(readFileSync(join(out, 'zip', '[name].js.zip')), '.zip exists');
+});
 
-        jsContent.replace(new RegExp("localhost:9000(\\\/(\\w){0,})+(.js)", 'gi'), function(match) {
-            if (!!~match.indexOf('localhost:9000')) {
-                matchCount++;
-            }
-        });
+test('naming - specified relative path with slash, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: './zip' });
+	t.truthy(readFileSync(join(out, 'zip', '[name].js.zip')), '.zip exists');
+});
 
-        jsContent.replace(new RegExp("[\"|']\/\/localhost:9000\/[\"|']", 'gi'), function(match) {
-            matchCount++;
-        });
+test('naming - specified relative path with parent, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: join(out, 'bin') }, { path: '../zip' });
+	t.truthy(readFileSync(join(out, 'zip', '[name].js.zip')), '.zip exists');
+});
 
-        expect(matchCount).to.be(2);
+test('naming - specified absolute path, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: join(out, 'zip') });
+	t.truthy(readFileSync(join(out, 'zip', '[name].js.zip')), '.zip exists');
+});
 
-        matchCount = 0;
-        jsContent = fs.readFileSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline/localhost/9000/js/libs/react.js'), "utf-8");
+test('naming - specified relative path, with webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, { path: 'zip' });
+	t.truthy(readFileSync(join(out, 'zip', 'bundle.js.zip')), '.zip exists');
+});
 
-        jsContent.replace(new RegExp("[\"|']\/\/localhost:9000\/[\"|']", 'gi'), function(match) {
-            matchCount++;
-        });
+test('naming - specified absolute path, with webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, { path: join(out, 'zip') });
+	t.truthy(readFileSync(join(out, 'zip', 'bundle.js.zip')), '.zip exists');
+});
 
-        expect(matchCount).to.be(1);
+test('naming - both specified, relative, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: 'zip', filename: 'archive' });
+	t.truthy(readFileSync(join(out, 'zip', 'archive.zip')), '.zip exists');
+});
 
-        decompress(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/offline.zip'), path.join(RUN_WEBPACK_DIST, '/resource-sameorigin/unzip')).then(files => {
-            let filesArr = [];
+test('naming - both specified, absolute, no webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out }, { path: join(out, 'zip'), filename: 'archive' });
+	t.truthy(readFileSync(join(out, 'zip', 'archive.zip')), '.zip exists');
+});
 
-            files.map((item) => {
-                filesArr.push(item.path);
-            });
-            
-            expect(!!~filesArr.indexOf('localhost/8000/css/index.css')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/entry.html')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/js/index.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/js/libs/react.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img')).to.be(false);
-            cb();
-        });
+test('naming - both specified, relative, with webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, { path: 'zip', filename: 'archive' });
+	t.truthy(readFileSync(join(out, 'zip', 'archive.zip')), '.zip exists');
+});
 
+test('naming - both specified, absolute, with webpack filename', async t => {
+	const out = randomPath();
+	await runWithOptions({ path: out, filename: 'bundle.js' }, { path: join(out, 'zip'), filename: 'archive' });
+	t.truthy(readFileSync(join(out, 'zip', 'archive.zip')), '.zip exists');
+});
 
-    });
-
-    it("=> check offline folder with same origin js files without uglify", function(cb) {
-
-        expect(fs.existsSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline.zip'))).to.be(true);
-      
-        var offline = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline'),
-            localhost = fs.readdirSync(offline);
-
-        expect(localhost[0]).to.be('localhost');
-
-        var localhost = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost'),
-            ports = fs.readdirSync(localhost);
-      
-        expect(ports[0]).to.be('8000');
-        expect(ports[1]).to.be('9000');
-
-        var port9000 = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost/9000'),
-            htmlFolder = fs.readdirSync(port9000),
-            jsFolder = fs.readdirSync(path.join(port9000, 'js'));
-
-        expect(htmlFolder[0]).to.be('entry.html');
-        expect(jsFolder[0]).to.be('detail.js');
-        expect(jsFolder[1]).to.be('index.js');
-        expect(jsFolder[2]).to.be('libs');
-
-        var port8000 = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost/8000'),
-            cssFolder = fs.readdirSync(path.join(port8000, 'css'));
-
-        expect(cssFolder[0]).to.be('index.css');
-
-        var libs = path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost/9000/js/libs/'),
-            libsFolder = fs.readdirSync(libs);
-
-        expect(libsFolder[0]).to.be('react.js');
-
-        let htmlContent = fs.readFileSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost/9000/entry.html'), "utf-8");
-
-        let matchCount = 0;
-        //
-        htmlContent.replace(new RegExp("(<script[^>]*src=([\'\"]*)(.*?)([\'\"]*).*?\>(<\/script>)?)", 'gi'), function(match) {
-            if (!!~match.indexOf('localhost:9000')) {
-                matchCount++;
-            }
-        });
-
-        expect(matchCount).to.be(2);
-
-
-        let jsContent = fs.readFileSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost/9000/js/index.js'), "utf-8");
-        matchCount = 0;
-
-        jsContent.replace(new RegExp("localhost:9000(\\\/(\\w){0,})+(.js)", 'gi'), function(match) {
-            if (!!~match.indexOf('localhost:9000')) {
-                matchCount++;
-            }
-        });
-
-        jsContent.replace(new RegExp("[\"|']\/\/localhost:9000\/[\"|']", 'gi'), function(match) {
-            matchCount++;
-        });
-
-        expect(matchCount).to.be(2);
-
-        matchCount = 0;
-        jsContent = fs.readFileSync(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline/localhost/9000/js/libs/react.js'), "utf-8");
-
-        jsContent.replace(new RegExp("[\"|']\/\/localhost:9000\/[\"|']", 'gi'), function(match) {
-            matchCount++;
-        });
-
-        expect(matchCount).to.be(1);
-
-        decompress(path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/offline.zip'), path.join(RUN_WEBPACK_DIST, '/resource-sameorigin-withoutuglify/unzip')).then(files => {
-            let filesArr = [];
-
-            files.map((item) => {
-                filesArr.push(item.path);
-            });
-            
-            expect(!!~filesArr.indexOf('localhost/8000/css/index.css')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/entry.html')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/js/index.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/9000/js/libs/react.js')).to.be(true);
-            expect(!!~filesArr.indexOf('localhost/8000/img')).to.be(false);
-            cb();
-        });
-
-
-    });
+test.after(() => {
+	rimraf.sync(join(__dirname, 'dist'));
 });
