@@ -43,10 +43,10 @@ ZipPlugin.prototype.apply = function(compiler) {
 			if (!ModuleFilenameHelpers.matchObject({ include: options.include, exclude: options.exclude }, nameAndPath)) continue;
 
 			var source = compilation.assets[nameAndPath].source();
-
+			var newPath = pathMapper(nameAndPath);
 			zipFile.addBuffer(
 				Buffer.isBuffer(source) ? source : new Buffer(beforeAddBuffer(source, nameAndPath)),
-				path.join(pathPrefix, pathMapper(nameAndPath)),
+				path.join(pathPrefix, newPath.replace(/\?.*/, '')),
 				options.fileOptions
 			);
 		}
