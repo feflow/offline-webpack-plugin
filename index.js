@@ -44,6 +44,10 @@ ZipPlugin.prototype.apply = function(compiler) {
 
 			var source = compilation.assets[nameAndPath].source();
 			var newPath = pathMapper(nameAndPath);
+			
+			if (/now_config\.json/.test(newPath)) {
+				newPath = 'now_config.json';
+			}
 			zipFile.addBuffer(
 				Buffer.isBuffer(source) ? source : new Buffer(beforeAddBuffer(source, nameAndPath)),
 				path.join(pathPrefix, newPath.replace(/\?.*/, '')),
