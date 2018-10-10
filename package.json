@@ -1,6 +1,6 @@
 {
   "name": "offline-webpack-plugin",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "Webpack plugin to zip up emitted files.",
   "main": "index.js",
   "scripts": {
